@@ -35,7 +35,13 @@ if not HONEYPOT_API_KEY:
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY not set")
 
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+openai_client = None
+if OPENAI_API_KEY:
+    try:
+        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    except Exception as e:
+        print("OpenAI init failed:", e)
+
 
 # ======================================================
 # IN-MEMORY SESSION STORE
@@ -105,22 +111,26 @@ def extract_intelligence(text: str, intel: Dict[str, List[str]]):
 # ======================================================
 
 async def agent_reply(message: str, history: List[str]) -> str:
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if not openai_client:
+        return "I’m not sure what you mean. Could you please explain?"
 
-    # Keep last few turns only (prevents hallucination & latency)
-    for h in history[-6:]:
-        messages.append({"role": "user", "content": h})
+    try:
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for h in history:
+            messages.append({"role": "user", "content": h})
+        messages.append({"role": "user", "content": message})
 
-    messages.append({"role": "user", "content": message})
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=150
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print("OpenAI error:", e)
+        return "Sorry, can you say that again?"
 
-    response = await openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        temperature=0.7,
-        max_tokens=120
-    )
-
-    return response.choices[0].message.content.strip()
 
 # ======================================================
 # GUVI FINAL CALLBACK
