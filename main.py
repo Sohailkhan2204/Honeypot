@@ -6,77 +6,123 @@ import re
 import httpx
 from openai import AsyncOpenAI
 
+# ======================================================
+# APP SETUP
+# ======================================================
+
 app = FastAPI(title="Agentic Honeypot API")
 
-# ================== ENV VARS ==================
+# ======================================================
+# ENVIRONMENT VARIABLES
+# ======================================================
+
 HONEYPOT_API_KEY = os.getenv("HONEYPOT_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not HONEYPOT_API_KEY:
     raise RuntimeError("HONEYPOT_API_KEY not set")
+
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY not set")
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# ================== SESSION STORE ==================
+# ======================================================
+# IN-MEMORY SESSION STORE
+# (OK for hackathon; Redis/DB in production)
+# ======================================================
+
 sessions: Dict[str, Dict[str, Any]] = {}
 
-# ================== AGENT PROMPT ==================
+# ======================================================
+# AGENT SYSTEM PROMPT
+# ======================================================
+
 SYSTEM_PROMPT = """
-You are an elderly, naive person.
-You are talking to someone who may be a scammer.
+You are a real elderly person, polite, slow, and slightly confused.
 
 Rules:
-- Sound polite, confused, and cooperative
-- Never accuse them of scamming
-- Never reveal you are an AI
-- Ask simple clarifying questions
+- Never accuse the other person of scamming
+- Never mention security, fraud detection, or AI
+- Ask simple clarifying questions naturally
 - Encourage them to explain steps, links, phone numbers, or UPI IDs
 - Never share real OTPs, bank details, or personal info
-- Keep the conversation going
-
-If the message is in Hindi, reply in Hindi.
-If in English, reply in English.
+- Occasionally use warm address terms like "beta" or "dear", but NOT in every reply
+- Vary tone and phrasing like a real human
+- If the message is in Hindi, reply in Hindi
+- If the message is in English, reply in English
 """
 
-# ================== SCAM LOGIC ==================
+# ======================================================
+# SCAM DETECTION & INTELLIGENCE EXTRACTION
+# ======================================================
+
 SCAM_KEYWORDS = [
     "otp", "urgent", "verify", "blocked", "suspended",
-    "upi", "bank", "account", "kyc", "immediately"
+    "upi", "bank", "account", "kyc", "immediately",
+    "click", "link", "transfer", "payment"
 ]
 
 def detect_scam(text: str) -> bool:
-    return any(word in text.lower() for word in SCAM_KEYWORDS)
+    """Lightweight scam intent detection"""
+    text_lower = text.lower()
+    return any(word in text_lower for word in SCAM_KEYWORDS)
 
-def extract_intel(text: str, intel: Dict[str, List[str]]):
-    intel["upiIds"] += re.findall(r'[\w.+-]+@[\w]+', text)
-    intel["phoneNumbers"] += re.findall(r'(?:\+91)?[6-9]\d{9}', text)
-    intel["phishingLinks"] += re.findall(r'https?://\S+', text)
+def extract_intelligence(text: str, intel: Dict[str, List[str]]):
+    """Extract actionable scam intelligence"""
+    upi_ids = re.findall(r'[\w.+-]+@[\w]+', text)
+    phone_numbers = re.findall(r'(?:\+91[\-\s]?)?[6-9]\d{9}', text)
+    phishing_links = re.findall(r'https?://\S+', text)
 
-# ================== AI AGENT ==================
+    for u in upi_ids:
+        if u not in intel["upiIds"]:
+            intel["upiIds"].append(u)
+
+    for p in phone_numbers:
+        if p not in intel["phoneNumbers"]:
+            intel["phoneNumbers"].append(p)
+
+    for l in phishing_links:
+        if l not in intel["phishingLinks"]:
+            intel["phishingLinks"].append(l)
+
+    for kw in SCAM_KEYWORDS:
+        if kw in text.lower() and kw not in intel["suspiciousKeywords"]:
+            intel["suspiciousKeywords"].append(kw)
+
+# ======================================================
+# AI AGENT RESPONSE
+# ======================================================
+
 async def agent_reply(message: str, history: List[str]) -> str:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for h in history:
+
+    # Keep last few turns only (prevents hallucination & latency)
+    for h in history[-6:]:
         messages.append({"role": "user", "content": h})
+
     messages.append({"role": "user", "content": message})
 
     response = await openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
         temperature=0.7,
-        max_tokens=150
+        max_tokens=120
     )
+
     return response.choices[0].message.content.strip()
 
-# ================== GUVI CALLBACK ==================
+# ======================================================
+# GUVI FINAL CALLBACK
+# ======================================================
+
 async def send_final_to_guvi(session_id: str, session: Dict[str, Any]):
     payload = {
         "sessionId": session_id,
         "scamDetected": True,
         "totalMessagesExchanged": session["count"],
         "extractedIntelligence": session["intel"],
-        "agentNotes": "Scammer used urgency and credential theft tactics"
+        "agentNotes": session["agent_notes"]
     }
 
     async with httpx.AsyncClient() as client:
@@ -86,65 +132,126 @@ async def send_final_to_guvi(session_id: str, session: Dict[str, Any]):
             timeout=5
         )
 
-# ================== MAIN ENDPOINT ==================
+# ======================================================
+# MAIN HONEYPOT ENDPOINT
+# ======================================================
+
 @app.post("/honeypot/message")
 async def honeypot_message(
     request: Request,
     x_api_key: str = Header(None, alias="x-api-key")
 ):
-    # 1. Auth check
+    # ---------------- AUTH ----------------
     if x_api_key != HONEYPOT_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
-    # 2. Safely read JSON (even if empty/minimal)
+    # ---------------- SAFE JSON READ ----------------
     try:
         data = await request.json()
     except:
         data = {}
 
-    # 3. Handle minimal tester request
+    # ---------------- ENDPOINT TESTER SUPPORT ----------------
     if "message" not in data:
         return {
             "status": "success",
-            "scamDetected": False,
-            "agentResponse": "Honeypot active and ready.",
-            "engagementMetrics": {
-                "engagementDurationSeconds": 0,
-                "totalMessagesExchanged": 0
-            },
-            "extractedIntelligence": {},
-            "agentNotes": "Endpoint validation check"
+            "reply": "Honeypot active and ready.",
+            "scamDetected": False
         }
 
-    # 4. Handle full hackathon-style request
-    message_text = ""
-    if isinstance(data.get("message"), dict):
-        message_text = data["message"].get("text", "")
-    elif isinstance(data.get("message"), str):
-        message_text = data["message"]
+    # ---------------- EXTRACT MESSAGE ----------------
+    session_id = data.get("sessionId", "default-session")
 
-    # 5. Very basic scam detection (enough for tester)
-    scam_keywords = ["blocked", "verify", "otp", "urgent", "account"]
-    detected = any(k in message_text.lower() for k in scam_keywords)
+    message_obj = data.get("message", {})
+    message_text = message_obj.get("text", "").strip()
 
-    # 6. Return proper response
+    # ---------------- EMPTY MESSAGE HANDLING ----------------
+    if not message_text:
+        return {
+            "status": "success",
+            "reply": "Sorry, could you repeat that?",
+            "scamDetected": False
+        }
+
+    # ---------------- SESSION INIT ----------------
+    if session_id not in sessions:
+        sessions[session_id] = {
+            "count": 0,
+            "history": [],
+            "scamDetected": False,
+            "final_sent": False,
+            "intel": {
+                "bankAccounts": [],
+                "upiIds": [],
+                "phishingLinks": [],
+                "phoneNumbers": [],
+                "suspiciousKeywords": []
+            },
+            "agent_notes": ""
+        }
+
+    session = sessions[session_id]
+    session["count"] += 1
+
+    # ---------------- SCAM DETECTION ----------------
+    if detect_scam(message_text):
+        session["scamDetected"] = True
+
+    # ---------------- INTEL EXTRACTION (ONLY FROM SCAMMER TEXT) ----------------
+    extract_intelligence(message_text, session["intel"])
+
+    # ---------------- AGENT RESPONSE ----------------
+    reply_text = await agent_reply(message_text, session["history"])
+    session["history"].append(message_text)
+
+    # ---------------- AGENT NOTES ----------------
+    tactics = []
+    if "urgent" in message_text.lower():
+        tactics.append("urgency")
+    if any(x in message_text.lower() for x in ["otp", "pin", "password"]):
+        tactics.append("credential theft")
+    if session["intel"]["upiIds"]:
+        tactics.append("payment redirection")
+    if session["intel"]["phishingLinks"]:
+        tactics.append("phishing")
+
+    session["agent_notes"] = (
+        "Scammer tactics observed: " + ", ".join(tactics)
+        if tactics else "Engagement ongoing"
+    )
+
+    # ---------------- ADAPTIVE FINAL CALLBACK ----------------
+    should_send_final = (
+        session["scamDetected"]
+        and not session["final_sent"]
+        and (
+            session["count"] >= 5
+            or len(session["intel"]["upiIds"]) > 0
+            or len(session["intel"]["phishingLinks"]) > 0
+            or len(session["intel"]["phoneNumbers"]) > 0
+        )
+    )
+
+    if should_send_final:
+        await send_final_to_guvi(session_id, session)
+        session["final_sent"] = True
+
+    # ---------------- RESPONSE ----------------
     return {
         "status": "success",
-        "scamDetected": detected,
-        "agentResponse": "Oh beta, I don’t understand. Why are you saying my account is blocked?",
+        "reply": reply_text,
+        "scamDetected": session["scamDetected"],
         "engagementMetrics": {
-            "engagementDurationSeconds": 1,
-            "totalMessagesExchanged": 1
+            "totalMessagesExchanged": session["count"]
         },
-        "extractedIntelligence": {
-            "suspiciousKeywords": [
-                k for k in scam_keywords if k in message_text.lower()
-            ]
-        },
-        "agentNotes": "Basic honeypot response generated"
+        "extractedIntelligence": session["intel"],
+        "agentNotes": session["agent_notes"]
     }
 
-# ================== HEALTH ==================
+# ======================================================
+# HEALTH CHECK
+# ======================================================
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
