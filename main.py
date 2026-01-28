@@ -5,12 +5,22 @@ import os
 import re
 import httpx
 from openai import AsyncOpenAI
-
+from fastapi.middleware.cors import CORSMiddleware
 # ======================================================
 # APP SETUP
 # ======================================================
 
 app = FastAPI(title="Agentic Honeypot API")
+#--------------------------------------------
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # for testing (safe here)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ======================================================
 # ENVIRONMENT VARIABLES
