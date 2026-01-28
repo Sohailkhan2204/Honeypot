@@ -112,7 +112,8 @@ def extract_intelligence(text: str, intel: Dict[str, List[str]]):
 
 async def agent_reply(message: str, history: List[str]) -> str:
     if not openai_client:
-        return "I’m not sure what you mean. Could you please explain?"
+        print(" OpenAI client not initialized")
+        return "I’m a bit confused. Could you explain again?"
 
     try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -121,15 +122,20 @@ async def agent_reply(message: str, history: List[str]) -> str:
         messages.append({"role": "user", "content": message})
 
         response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-3.5-turbo",  # TEMP SAFE MODEL
             messages=messages,
             temperature=0.7,
-            max_tokens=150
+            max_tokens=120
         )
-        return response.choices[0].message.content.strip()
+
+        reply = response.choices[0].message.content.strip()
+        print("✅ OpenAI reply:", reply)
+        return reply
+
     except Exception as e:
-        print("OpenAI error:", e)
-        return "Sorry, can you say that again?"
+        print(" OpenAI error:", e)
+        return "I’m not sure I understood that. Can you explain slowly?"
+
 
 
 # ======================================================
