@@ -27,7 +27,7 @@ sessions: Dict[str, Dict[str, Any]] = {}
 
 # ================= PROMPT =================
 SYSTEM_PROMPT = """
-SYSTEM_PROMPT = """
+
 You are a real human responding naturally to a stressful banking issue.
 
 Persona:
@@ -82,7 +82,7 @@ End goal:
 Make the scammer voluntarily share numbers, links, IDs, processes, and identities while believing the victim may comply.
 """
 
-"""
+
 
 SCAM_KEYWORDS = [
     "otp","urgent","verify","blocked","suspended","upi","bank",
